@@ -148,7 +148,7 @@ cat("barcode length matched (16bp):", (nchar(new_tokens[2]) == 16 && nchar(ref_t
 }
 ```
 
-
+```
 backup created: GSM5029338_BL_dataset2_rawbackup.txt.gz 
 
 file: GSM5029338_BL_dataset2.txt.gz 
@@ -175,6 +175,7 @@ dataset 1 first 4 tokens     :  | AAACCTGAGTCCATAC | AAACCTGAGTCTCCTC | AAACCTGA
 dataset 2 fixed first 4 tokens:  | AAACCTGAGATCCGAG | AAACCTGAGCTGTCTA | AAACCTGCACAACGCC 
 leading empty token matched  : TRUE 
 barcode length matched (16bp): TRUE 
+```
 
 # compare headers for dataset 1 and 2 again
 ```
@@ -356,6 +357,7 @@ cat("feature metadata (first 6 rows):\n")
 print(head(seu[["RNA"]][[]]))
 ```
 
+```
 marker validation:
 expected markers found: Ly6g, S100a8, S100a9, Itgam, Mpo, Elane, Actb, Gapdh 
 
@@ -387,7 +389,7 @@ Mpo            Mpo                126         2614
 Elane        Elane                118         4504
 Actb          Actb              16286       403430
 Gapdh        Gapdh               6664        13572
-
+```
 
 # QC view on merged preQC rds
 ```r
