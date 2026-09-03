@@ -6,7 +6,7 @@ cd neutrotime
 wget "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE165nnn/GSE165276/suppl/GSE165276_RAW.tar"
 tar -xvf GSE165276_RAW.tar 
 ```
-
+- we only focus on the healthy (non inflammation) datasets now 
 ```
 [hpc6297@frnt153 neutrotime]$ ls -lht
 total 44M
