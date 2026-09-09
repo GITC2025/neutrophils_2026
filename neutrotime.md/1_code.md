@@ -735,6 +735,1403 @@ quantiles (1%, 2%, 3%, 4%, 96%, 97%, 98%, 99%):
 99% 5417.12  1600.92        7.306       47.190
 ```
 
+# singleR celldex immgen LABELS MAIN 
+- label.main Neutrophils
+- 4 finer labels have inflamm conditions and healthy PBL
+- collapsed from original 6 labels
+
+```r
+options(width = 800)
+library(Seurat)
+library(SingleR)
+library(celldex)
+library(BiocParallel)
+
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+# set biocparallel to 8 workers
+bpparam <- MulticoreParam(workers = 8)
+register(bpparam)
+
+# load pre-qc merged seurat object
+rds_path <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_preQC_merged.rds"
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+# extract counts matrix for singler
+counts_mat <- GetAssayData(seurat_obj, assay = "RNA", layer = "counts")
+
+# fetch mouse immgen reference (2024-02-26 snapshot)
+ref_immgen <- celldex::fetchReference("immgen", "2024-02-26")
+
+# run singler annotation using label.main with 8 workers
+pred_immgen <- SingleR(
+test = counts_mat,
+ref = ref_immgen,
+labels = ref_immgen$label.main,
+BPPARAM = bpparam
+)
+
+# append annotation metadata
+seurat_obj$SingleR_ImmGen_main <- pred_immgen$labels
+seurat_obj$SingleR_ImmGen_pruned <- pred_immgen$pruned.labels
+seurat_obj$is_neutrophil <- ifelse(!is.na(pred_immgen$pruned.labels) & pred_immgen$pruned.labels == "Neutrophils", TRUE, FALSE)
+
+# atomic save to preQC merged rds
+tmp_rds <- paste0(rds_path, ".tmp.", Sys.getpid())
+saveRDS(seurat_obj, file = tmp_rds)
+file.rename(tmp_rds, rds_path)
+
+# calculate global metrics
+global_before <- ncol(seurat_obj)
+global_after <- sum(!is.na(seurat_obj$SingleR_ImmGen_pruned))
+global_neutro_count <- sum(seurat_obj$is_neutrophil, na.rm = TRUE)
+global_neutro_pct <- (global_neutro_count / global_after) * 100
+
+global_df <- data.frame(
+sample_id = "GLOBAL",
+cells_before = global_before,
+cells_after = global_after,
+neutrophil_count = global_neutro_count,
+neutrophil_pct = round(global_neutro_pct, 2)
+)
+
+# calculate per dataset metrics
+samples <- unique(seurat_obj$sample_id)
+sample_df_list <- lapply(samples, function(s) {
+cells_s <- colnames(seurat_obj)[seurat_obj$sample_id == s]
+cnt_before <- length(cells_s)
+pruned_s <- seurat_obj$SingleR_ImmGen_pruned[cells_s]
+cnt_after <- sum(!is.na(pruned_s))
+cnt_neutro <- sum(seurat_obj$is_neutrophil[cells_s], na.rm = TRUE)
+pct_neutro <- ifelse(cnt_after > 0, (cnt_neutro / cnt_after) * 100, 0)
+data.frame(
+sample_id = as.character(s),
+cells_before = cnt_before,
+cells_after = cnt_after,
+neutrophil_count = cnt_neutro,
+neutrophil_pct = round(pct_neutro, 2)
+)
+})
+
+metrics_df <- rbind(global_df, do.call(rbind, sample_df_list))
+
+# print metrics to console
+print(metrics_df, row.names = FALSE)
+
+# save metrics to tsv
+out_tsv <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_singler_metrics.tsv"
+write.table(metrics_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+## Immgen neutrophils FINE LABELS
+```R
+options(width = 800)
+library(Seurat)
+library(SingleR)
+library(celldex)
+library(BiocParallel)
+
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+# set biocparallel to 8 workers
+bpparam <- MulticoreParam(workers = 8)
+register(bpparam)
+
+# load pre-qc merged seurat object
+rds_path <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_preQC_merged.rds"
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+# extract counts matrix for singler
+counts_mat <- GetAssayData(seurat_obj, assay = "RNA", layer = "counts")
+
+# fetch mouse immgen reference (2024-02-26 snapshot)
+ref_immgen <- celldex::fetchReference("immgen", "2024-02-26")
+
+# run singler annotation using label.fine with 8 workers
+pred_immgen_fine <- SingleR(
+test = counts_mat,
+ref = ref_immgen,
+labels = ref_immgen$label.fine,
+BPPARAM = bpparam
+)
+
+# define target fine labels for neutrophils
+neutro_fine_labels <- c(
+"Neutrophils (GN)",
+"Neutrophils (GN.ARTH)",
+"Neutrophils (GN.Thio)",
+"Neutrophils (GN.URAC)"
+)
+
+# append annotation metadata
+seurat_obj$SingleR_ImmGen_fine <- pred_immgen_fine$labels
+seurat_obj$SingleR_ImmGen_fine_pruned <- pred_immgen_fine$pruned.labels
+seurat_obj$is_neutrophil_fine <- ifelse(
+!is.na(pred_immgen_fine$pruned.labels) & pred_immgen_fine$pruned.labels %in% neutro_fine_labels,
+TRUE,
+FALSE
+)
+
+# atomic save to preQC merged rds
+tmp_rds <- paste0(rds_path, ".tmp.", Sys.getpid())
+saveRDS(seurat_obj, file = tmp_rds)
+file.rename(tmp_rds, rds_path)
+
+# calculate global metrics
+global_before <- ncol(seurat_obj)
+global_after <- sum(!is.na(seurat_obj$SingleR_ImmGen_fine_pruned))
+global_neutro_count <- sum(seurat_obj$is_neutrophil_fine, na.rm = TRUE)
+global_neutro_pct <- ifelse(global_after > 0, (global_neutro_count / global_after) * 100, 0)
+
+global_df <- data.frame(
+sample_id = "GLOBAL",
+cells_before = global_before,
+cells_after = global_after,
+neutrophil_count = global_neutro_count,
+neutrophil_pct = round(global_neutro_pct, 2),
+stringsAsFactors = FALSE
+)
+
+# calculate per dataset metrics
+samples <- unique(seurat_obj$sample_id)
+sample_df_list <- lapply(samples, function(s) {
+cells_s <- colnames(seurat_obj)[seurat_obj$sample_id == s]
+cnt_before <- length(cells_s)
+pruned_s <- seurat_obj$SingleR_ImmGen_fine_pruned[cells_s]
+cnt_after <- sum(!is.na(pruned_s))
+cnt_neutro <- sum(seurat_obj$is_neutrophil_fine[cells_s], na.rm = TRUE)
+pct_neutro <- ifelse(cnt_after > 0, (cnt_neutro / cnt_after) * 100, 0)
+data.frame(
+sample_id = as.character(s),
+cells_before = cnt_before,
+cells_after = cnt_after,
+neutrophil_count = cnt_neutro,
+neutrophil_pct = round(pct_neutro, 2),
+stringsAsFactors = FALSE
+)
+})
+
+sample_df <- do.call(rbind, sample_df_list)
+
+# calculate dataset 1 and dataset 2 summary block
+d1_rows <- sample_df[grepl("dataset1", sample_df$sample_id), ]
+d2_rows <- sample_df[grepl("dataset2", sample_df$sample_id), ]
+
+agg_list <- list()
+
+if (nrow(d1_rows) > 0) {
+b_d1 <- sum(d1_rows$cells_before)
+a_d1 <- sum(d1_rows$cells_after)
+n_d1 <- sum(d1_rows$neutrophil_count)
+p_d1 <- ifelse(a_d1 > 0, round((n_d1 / a_d1) * 100, 2), 0)
+agg_list[[length(agg_list) + 1]] <- data.frame(
+sample_id = "SUM_dataset1",
+cells_before = b_d1,
+cells_after = a_d1,
+neutrophil_count = n_d1,
+neutrophil_pct = p_d1,
+stringsAsFactors = FALSE
+)
+}
+
+if (nrow(d2_rows) > 0) {
+b_d2 <- sum(d2_rows$cells_before)
+a_d2 <- sum(d2_rows$cells_after)
+n_d2 <- sum(d2_rows$neutrophil_count)
+p_d2 <- ifelse(a_d2 > 0, round((n_d2 / a_d2) * 100, 2), 0)
+agg_list[[length(agg_list) + 1]] <- data.frame(
+sample_id = "SUM_dataset2",
+cells_before = b_d2,
+cells_after = a_d2,
+neutrophil_count = n_d2,
+neutrophil_pct = p_d2,
+stringsAsFactors = FALSE
+)
+}
+
+summary_block <- do.call(rbind, agg_list)
+full_metrics_df <- rbind(global_df, sample_df, summary_block)
+
+# save metrics to tsv with labelsfine appended
+out_tsv <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_singler_metrics_labelsfine.tsv"
+write.table(full_metrics_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# print complete tsv
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+
+# main vs fine labels concordance 
+```r
+out_tsv <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_labels_concordance.tsv"
+
+neutro_fine_labels <- c(
+"Neutrophils (GN)",
+"Neutrophils (GN.ARTH)",
+"Neutrophils (GN.Thio)",
+"Neutrophils (GN.URAC)"
+)
+
+cells_main <- colnames(seurat_obj)[!is.na(seurat_obj$SingleR_ImmGen_pruned) & seurat_obj$SingleR_ImmGen_pruned == "Neutrophils"]
+cells_fine <- colnames(seurat_obj)[!is.na(seurat_obj$SingleR_ImmGen_fine_pruned) & seurat_obj$SingleR_ImmGen_fine_pruned %in% neutro_fine_labels]
+
+shared_cells <- intersect(cells_main, cells_fine)
+only_main <- setdiff(cells_main, cells_fine)
+only_fine <- setdiff(cells_fine, cells_main)
+union_cells <- union(cells_main, cells_fine)
+
+df_overlap <- data.frame(
+barcode = union_cells,
+sample_id = seurat_obj$sample_id[union_cells],
+in_main = union_cells %in% cells_main,
+in_fine = union_cells %in% cells_fine,
+stringsAsFactors = FALSE
+)
+
+overlap_by_sample <- do.call(rbind, lapply(split(df_overlap, df_overlap$sample_id), function(sub) {
+n_main <- sum(sub$in_main)
+n_fine <- sum(sub$in_fine)
+n_shared <- sum(sub$in_main & sub$in_fine)
+n_only_main <- sum(sub$in_main & !sub$in_fine)
+n_only_fine <- sum(!sub$in_main & sub$in_fine)
+data.frame(
+sample_id = unique(sub$sample_id),
+neutrophils_main = n_main,
+neutrophils_fine = n_fine,
+retained_in_both = n_shared,
+lost_in_fine = n_only_main,
+gained_in_fine = n_only_fine,
+pct_fine_retained_in_main = ifelse(n_fine > 0, round((n_shared / n_fine) * 100, 2), 0),
+pct_main_retained_in_fine = ifelse(n_main > 0, round((n_shared / n_main) * 100, 2), 0),
+stringsAsFactors = FALSE
+)
+}))
+
+global_row <- data.frame(
+sample_id = "GLOBAL",
+neutrophils_main = length(cells_main),
+neutrophils_fine = length(cells_fine),
+retained_in_both = length(shared_cells),
+lost_in_fine = length(only_main),
+gained_in_fine = length(only_fine),
+pct_fine_retained_in_main = ifelse(length(cells_fine) > 0, round((length(shared_cells) / length(cells_fine)) * 100, 2), 0),
+pct_main_retained_in_fine = ifelse(length(cells_main) > 0, round((length(shared_cells) / length(cells_main)) * 100, 2), 0),
+stringsAsFactors = FALSE
+)
+
+concordance_df <- rbind(global_row, overlap_by_sample)
+
+write.table(concordance_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("saved concordance metrics to", out_tsv, "\n\n")
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+
+# format discordance tables as two-column data frames
+main_only_df <- as.data.frame(table(label_fine = seurat_obj$SingleR_ImmGen_fine_pruned[only_main], useNA = "ifany"), responseName = "cell_count")
+main_only_df <- main_only_df[order(-main_only_df$cell_count), ]
+
+fine_only_df <- as.data.frame(table(label_main = seurat_obj$SingleR_ImmGen_pruned[only_fine], useNA = "ifany"), responseName = "cell_count")
+fine_only_df <- fine_only_df[order(-fine_only_df$cell_count), ]
+
+cat("\nidentity in label.fine of cells kept only by label.main:\n")
+print(main_only_df, row.names = FALSE)
+
+cat("\nidentity in label.main of cells kept only by label.fine:\n")
+print(fine_only_df, row.names = FALSE)
+```
+
+```
+saved concordance metrics to /global/scratch/hpc6297/neutrotime_output/neutrotime_labels_concordance.tsv 
+
+                     sample_id neutrophils_main neutrophils_fine retained_in_both lost_in_fine gained_in_fine pct_fine_retained_in_main pct_main_retained_in_fine
+                        GLOBAL            13392            13129            13111          281             18                     99.86                     97.90
+ GSM5029335_BL_dataset1.txt.gz             1394             1383             1383           11              0                    100.00                     99.21
+ GSM5029336_BM_dataset1.txt.gz             1212             1198             1198           14              0                    100.00                     98.84
+ GSM5029337_SP_dataset1.txt.gz             1165             1163             1163            2              0                    100.00                     99.83
+ GSM5029338_BL_dataset2.txt.gz             4068             3903             3891          177             12                     99.69                     95.65
+ GSM5029339_BM_dataset2.txt.gz             3427             3404             3402           25              2                     99.94                     99.27
+ GSM5029340_SP_dataset2.txt.gz             2126             2078             2074           52              4                     99.81                     97.55
+
+identity in label.fine of cells kept only by label.main:
+                   label_fine cell_count
+                         <NA>        150
+        Monocytes (MO.6C-II+)         44
+           B cells (proB.FrA)         36
+              B cells (B.FrF)          8
+             Macrophages (MF)          8
+        Monocytes (MO.6C+II-)          8
+      Monocytes (MO.6C-IIINT)          7
+           B cells (proB.CLP)          6
+             Stem cells (GMP)          3
+           Stem cells (LTHSC)          3
+         Stem cells (SC.STSL)          3
+             Stem cells (MLP)          2
+ Stromal cells (ST.31-38-44-)          2
+         NK cells (NK.DAP10-)          1
+
+identity in label.main of cells kept only by label.fine:
+  label_main cell_count
+        <NA>         15
+   Basophils          1
+ Macrophages          1
+   Monocytes          1
+```
+
+# subset to labels fine
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+options(width = 800)
+library(Seurat)
+library(SingleR)
+library(celldex)
+library(BiocParallel)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+bpparam <- MulticoreParam(workers = 8)
+register(bpparam)
+
+rds_path <- file.path(work_dir, "neutrotime_preQC_merged.rds")
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+counts_mat <- GetAssayData(seurat_obj, assay = "RNA", layer = "counts")
+ref_immgen <- celldex::fetchReference("immgen", "2024-02-26")
+
+pred_immgen_fine <- SingleR(
+test = counts_mat,
+ref = ref_immgen,
+labels = ref_immgen$label.fine,
+BPPARAM = bpparam
+)
+
+neutro_fine_labels <- c(
+"Neutrophils (GN)",
+"Neutrophils (GN.ARTH)",
+"Neutrophils (GN.Thio)",
+"Neutrophils (GN.URAC)"
+)
+
+seurat_obj$SingleR_ImmGen_fine <- pred_immgen_fine$labels
+seurat_obj$SingleR_ImmGen_fine_pruned <- pred_immgen_fine$pruned.labels
+seurat_obj$is_neutrophil_fine <- ifelse(
+!is.na(pred_immgen_fine$pruned.labels) & pred_immgen_fine$pruned.labels %in% neutro_fine_labels,
+TRUE,
+FALSE
+)
+
+tmp_merged_rds <- paste0(rds_path, ".tmp.", Sys.getpid())
+saveRDS(seurat_obj, file = tmp_merged_rds)
+file.rename(tmp_merged_rds, rds_path)
+
+neutro_subset <- subset(seurat_obj, subset = is_neutrophil_fine == TRUE)
+
+subset_rds_path <- file.path(work_dir, "neutrotime_preQC_neutrophils_fine.rds")
+tmp_subset_rds <- paste0(subset_rds_path, ".tmp.", Sys.getpid())
+saveRDS(neutro_subset, file = tmp_subset_rds)
+file.rename(tmp_subset_rds, subset_rds_path)
+
+global_before <- ncol(seurat_obj)
+global_after <- sum(!is.na(seurat_obj$SingleR_ImmGen_fine_pruned))
+global_neutro_count <- ncol(neutro_subset)
+global_neutro_pct <- ifelse(global_after > 0, (global_neutro_count / global_after) * 100, 0)
+
+global_df <- data.frame(
+sample_id = "GLOBAL",
+cells_before = global_before,
+cells_after = global_after,
+neutrophil_count = global_neutro_count,
+neutrophil_pct = round(global_neutro_pct, 2),
+stringsAsFactors = FALSE
+)
+
+samples <- unique(seurat_obj$sample_id)
+sample_df_list <- lapply(samples, function(s) {
+cells_s <- colnames(seurat_obj)[seurat_obj$sample_id == s]
+cnt_before <- length(cells_s)
+pruned_s <- seurat_obj$SingleR_ImmGen_fine_pruned[cells_s]
+cnt_after <- sum(!is.na(pruned_s))
+cnt_neutro <- sum(neutro_subset$sample_id == s)
+pct_neutro <- ifelse(cnt_after > 0, (cnt_neutro / cnt_after) * 100, 0)
+data.frame(
+sample_id = as.character(s),
+cells_before = cnt_before,
+cells_after = cnt_after,
+neutrophil_count = cnt_neutro,
+neutrophil_pct = round(pct_neutro, 2),
+stringsAsFactors = FALSE
+)
+})
+
+sample_df <- do.call(rbind, sample_df_list)
+
+d1_rows <- sample_df[grepl("dataset1", sample_df$sample_id), ]
+d2_rows <- sample_df[grepl("dataset2", sample_df$sample_id), ]
+
+agg_list <- list()
+
+if (nrow(d1_rows) > 0) {
+b_d1 <- sum(d1_rows$cells_before)
+a_d1 <- sum(d1_rows$cells_after)
+n_d1 <- sum(d1_rows$neutrophil_count)
+p_d1 <- ifelse(a_d1 > 0, round((n_d1 / a_d1) * 100, 2), 0)
+agg_list[[length(agg_list) + 1]] <- data.frame(
+sample_id = "SUM_dataset1",
+cells_before = b_d1,
+cells_after = a_d1,
+neutrophil_count = n_d1,
+neutrophil_pct = p_d1,
+stringsAsFactors = FALSE
+)
+}
+
+if (nrow(d2_rows) > 0) {
+b_d2 <- sum(d2_rows$cells_before)
+a_d2 <- sum(d2_rows$cells_after)
+n_d2 <- sum(d2_rows$neutrophil_count)
+p_d2 <- ifelse(a_d2 > 0, round((n_d2 / a_d2) * 100, 2), 0)
+agg_list[[length(agg_list) + 1]] <- data.frame(
+sample_id = "SUM_dataset2",
+cells_before = b_d2,
+cells_after = a_d2,
+neutrophil_count = n_d2,
+neutrophil_pct = p_d2,
+stringsAsFactors = FALSE
+)
+}
+
+summary_block <- do.call(rbind, agg_list)
+full_metrics_df <- rbind(global_df, sample_df, summary_block)
+
+print(full_metrics_df, row.names = FALSE)
+```
+
+# preQC check on neutrophil subset
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_preQC_neutrophils_fine.rds")
+out_tsv <- file.path(work_dir, "neutrophil_subset_preQC_metrics.tsv")
+
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+cat("metadata headers:\n")
+print(colnames(seurat_obj@meta.data))
+cat("\n")
+
+if (!"percent_mito" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_mito <- PercentageFeatureSet(seurat_obj, pattern = "^(mt-|MT-)")
+}
+if (!"percent_ribo" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_ribo <- PercentageFeatureSet(seurat_obj, pattern = "^(Rps|Rpl|RPS|RPL)")
+}
+
+qc_cols <- c("nCount_RNA", "nFeature_RNA", "percent_mito", "percent_ribo")
+qc_df <- seurat_obj@meta.data[, qc_cols]
+colnames(qc_df) <- c("ncount", "nfeature", "percent_mito", "percent_ribo")
+
+mito_genes <- grep("^(mt-|MT-)", rownames(seurat_obj), value = TRUE)
+ribo_genes <- grep("^(Rps|Rpl|RPS|RPL)", rownames(seurat_obj), value = TRUE)
+
+stats_list <- list(
+"total_genes" = c(nrow(seurat_obj), NA, NA, NA),
+"total_cells" = c(ncol(seurat_obj), NA, NA, NA),
+"mito_genes" = c(length(mito_genes), NA, NA, NA),
+"ribo_genes" = c(length(ribo_genes), NA, NA, NA),
+"Min." = sapply(qc_df, function(x) min(x, na.rm = TRUE)),
+"1%" = sapply(qc_df, function(x) quantile(x, 0.01, na.rm = TRUE)),
+"2%" = sapply(qc_df, function(x) quantile(x, 0.02, na.rm = TRUE)),
+"3%" = sapply(qc_df, function(x) quantile(x, 0.03, na.rm = TRUE)),
+"4%" = sapply(qc_df, function(x) quantile(x, 0.04, na.rm = TRUE)),
+"1st Qu." = sapply(qc_df, function(x) quantile(x, 0.25, na.rm = TRUE)),
+"Median" = sapply(qc_df, function(x) median(x, na.rm = TRUE)),
+"Mean" = sapply(qc_df, function(x) mean(x, na.rm = TRUE)),
+"3rd Qu." = sapply(qc_df, function(x) quantile(x, 0.75, na.rm = TRUE)),
+"96%" = sapply(qc_df, function(x) quantile(x, 0.96, na.rm = TRUE)),
+"97%" = sapply(qc_df, function(x) quantile(x, 0.97, na.rm = TRUE)),
+"98%" = sapply(qc_df, function(x) quantile(x, 0.98, na.rm = TRUE)),
+"99%" = sapply(qc_df, function(x) quantile(x, 0.99, na.rm = TRUE)),
+"Max." = sapply(qc_df, function(x) max(x, na.rm = TRUE))
+)
+
+mat_out <- do.call(rbind, stats_list)
+res_df <- data.frame(
+statistic = names(stats_list),
+round(mat_out, 4),
+row.names = NULL,
+stringsAsFactors = FALSE
+)
+colnames(res_df) <- c("statistic", "ncount", "nfeature", "percent_mito", "percent_ribo")
+
+write.table(res_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("saved metrics to", out_tsv, "\n\n")
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+
+# mito 5%
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_preQC_neutrophils_fine.rds")
+out_rds_path <- file.path(work_dir, "neutrotime_postmito5_neutrophils_fine.rds")
+
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+if (!"percent_mito" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_mito <- PercentageFeatureSet(seurat_obj, pattern = "^(mt-|MT-)")
+}
+
+cells_before <- ncol(seurat_obj)
+neutro_postmito <- subset(seurat_obj, subset = percent_mito < 5)
+cells_after <- ncol(neutro_postmito)
+cells_removed <- cells_before - cells_after
+
+tmp_out_rds <- paste0(out_rds_path, ".tmp.", Sys.getpid())
+saveRDS(neutro_postmito, file = tmp_out_rds)
+file.rename(tmp_out_rds, out_rds_path)
+
+cat(sprintf("cells before mito filter : %d\n", cells_before))
+cat(sprintf("cells removed (mito >= 5%%): %d\n", cells_removed))
+cat(sprintf("cells retained (< 5%% mito): %d\n", cells_after))
+cat("saved atomic rds to", out_rds_path, "\n")
+```
+neutrophil_postmito5_neutrophils_metrics.tsv
+
+# QC inflection graphs 
+```r
+options(width = 800)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_postmito5_neutrophils_fine.rds")
+seurat_obj <- readRDS(rds_path)
+DefaultAssay(seurat_obj) <- "RNA"
+
+if (!"percent_mito" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_mito <- PercentageFeatureSet(seurat_obj, pattern = "^(mt-|MT-)")
+}
+if (!"percent_ribo" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_ribo <- PercentageFeatureSet(seurat_obj, pattern = "^(Rps|Rpl|RPS|RPL)")
+}
+
+cfg <- list(
+dpi = 300,
+line_color = "#001F5B",
+global_dim = c(w = 10, h = 10),
+panel_dim = c(w = 10, h = 8),
+metrics = list(
+nCount_RNA = list(col = "ncount", label = "nCount_RNA", log = TRUE, pct = FALSE),
+nFeature_RNA = list(col = "nfeature", label = "nFeature_RNA", log = TRUE, pct = FALSE),
+percent_mito = list(col = "percent_mito", label = "percent_mito", log = FALSE, pct = TRUE),
+percent_ribo = list(col = "percent_ribo", label = "percent_ribo", log = FALSE, pct = TRUE)
+)
+)
+
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+qc_data <- seurat_obj@meta.data[, names(cfg$metrics)]
+
+# 1. global continuous percentile inflection plot
+plot_percentile_curve <- function(values, m_cfg) {
+sorted_vals <- sort(values, decreasing = FALSE)
+df <- data.frame(Percentile = (seq_along(sorted_vals) / length(sorted_vals)) * 100, Value = sorted_vals)
+p <- ggplot(df, aes(x = Percentile, y = Value)) +
+geom_line(color = cfg$line_color, linewidth = 1.1) +
+labs(title = paste(m_cfg$label, "Inflection"), x = "Percentile (%)", y = m_cfg$label) +
+theme_minimal(base_size = 12) +
+theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 13), panel.grid.minor = element_blank()) +
+scale_x_continuous(breaks = seq(0, 100, 20), limits = c(0, 100))
+if (m_cfg$log) {
+p <- p + scale_y_log10(labels = comma)
+} else {
+p <- p + scale_y_continuous(labels = comma)
+}
+return(p)
+}
+
+global_plots <- lapply(names(cfg$metrics), function(m) {
+plot_percentile_curve(qc_data[[m]], cfg$metrics[[m]])
+})
+
+plot_global <- (global_plots[[1]] | global_plots[[2]]) / (global_plots[[3]] | global_plots[[4]]) +
+plot_annotation(
+title = "Neutrotime QC Outliers (Neutrophil Subset)",
+subtitle = "After 5% Mito Ceiling",
+theme = theme(
+plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+plot.subtitle = element_text(face = "plain", size = 12, hjust = 0.5)
+)
+)
+
+out_png_plot <- file.path(work_dir, paste0("neutrotime_qc_percentile_inflections_", timestamp, ".png"))
+ggsave(out_png_plot, plot_global, width = cfg$global_dim["w"], height = cfg$global_dim["h"], dpi = cfg$dpi)
+
+# 2. sequenced percentile calculations and tsv output
+probs_sequenced <- sort(unique(c(
+seq(0, 0.01, by = 0.001),
+c(0.02, 0.03, 0.04, 0.05),
+c(0.95, 0.96, 0.97, 0.98, 0.99),
+seq(0.99, 1.0, by = 0.001)
+)))
+
+q_mat <- t(sapply(probs_sequenced, function(p) sapply(qc_data, function(x) quantile(x, probs = p, na.rm = TRUE))))
+
+percentile_labels <- ifelse(
+probs_sequenced == 0, "min",
+ifelse(probs_sequenced == 1, "max", paste0(round(probs_sequenced * 100, 2), "%"))
+)
+
+combined_df <- data.frame(
+prob = probs_sequenced,
+percentile = percentile_labels,
+round(q_mat, 4),
+row.names = NULL,
+stringsAsFactors = FALSE
+)
+colnames(combined_df) <- c("prob", "percentile", "ncount", "nfeature", "percent_mito", "percent_ribo")
+
+out_tsv <- file.path(work_dir, paste0("neutrotime_sequenced_percentiles_", timestamp, ".tsv"))
+write.table(combined_df[, -1], file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# 3. panel plotting for low and high inflection windows
+plot_quantile_curve <- function(df, m_cfg, range_label, x_breaks) {
+p <- ggplot(df, aes(x = prob * 100, y = .data[[m_cfg$col]])) +
+geom_line(color = cfg$line_color, linewidth = 1.0) +
+geom_point(color = cfg$line_color, size = 2) +
+labs(title = paste0(m_cfg$label, " (", range_label, ")"), x = "Percentile (%)", y = m_cfg$label) +
+theme_minimal(base_size = 11) +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5, size = 12),
+axis.text.x = element_text(angle = 45, hjust = 1)
+) +
+scale_x_continuous(breaks = x_breaks, minor_breaks = NULL, labels = scales::number_format(accuracy = 0.1))
+if (m_cfg$pct) {
+p <- p + scale_y_continuous(labels = function(x) paste0(x, "%"))
+} else {
+p <- p + scale_y_continuous(labels = comma)
+}
+return(p)
+}
+
+render_panel <- function(df, range_label, title, out_name, x_breaks, sub_text = "Inflection Detail") {
+plots <- lapply(cfg$metrics, function(m) plot_quantile_curve(df, m, range_label, x_breaks))
+panel <- (plots[[1]] | plots[[2]]) / (plots[[3]] | plots[[4]]) +
+plot_annotation(
+title = title,
+subtitle = sub_text,
+theme = theme(
+plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
+plot.subtitle = element_text(face = "plain", size = 11, hjust = 0.5)
+)
+)
+out_path <- file.path(work_dir, paste0(out_name, "_", timestamp, ".png"))
+ggsave(out_path, panel, width = cfg$panel_dim["w"], height = cfg$panel_dim["h"], dpi = cfg$dpi)
+return(out_path)
+}
+
+df_fine_low <- combined_df[combined_df$prob <= 0.01, ]
+df_fine_high <- combined_df[combined_df$prob >= 0.99, ]
+df_tail_low5 <- combined_df[combined_df$prob <= 0.05, ]
+df_tail_high5 <- combined_df[combined_df$prob >= 0.95, ]
+
+out_png_low <- render_panel(df_fine_low, "0% - 1.0%", "Neutrotime Fine Low Percentiles (0% to 1.0%)", "neutrotime_qc_fine_low_percentiles", seq(0, 1.0, by = 0.1), "0.1% Increments")
+out_png_high <- render_panel(df_fine_high, "99.0% - 100%", "Neutrotime Fine High Percentiles (99.0% to 100%)", "neutrotime_qc_fine_high_percentiles", seq(99.0, 100.0, by = 0.1), "0.1% Increments")
+out_png_low5 <- render_panel(df_tail_low5, "0% - 5.0%", "Neutrotime Low Percentiles (Min to 5%)", "neutrotime_qc_low_5pct_percentiles", seq(0, 5.0, by = 0.5), "0.5% Increments")
+out_png_high5 <- render_panel(df_tail_high5, "95.0% - 100%", "Neutrotime High Percentiles (95% to Max)", "neutrotime_qc_high_5pct_percentiles", seq(95.0, 100.0, by = 0.5), "0.5% Increments")
+
+cat(out_png_plot, "\n")
+cat(out_png_low, "\n")
+cat(out_png_high, "\n")
+cat(out_png_low5, "\n")
+cat(out_png_high5, "\n")
+cat(out_tsv, "\n\n")
+
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+110516.tsv 
+
+## QC at 1% and 99% features
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_in <- file.path(work_dir, "neutrotime_postmito5_neutrophils_fine.rds")
+rds_out <- file.path(work_dir, "neutrotime_postquantile_features1_99_neutrophils_fine.rds")
+out_tsv <- file.path(work_dir, "neutrophil_postquantile_features1_99_neutrophils_metrics.tsv")
+
+seurat_obj <- readRDS(rds_in)
+DefaultAssay(seurat_obj) <- "RNA"
+
+if (!"percent_mito" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_mito <- PercentageFeatureSet(seurat_obj, pattern = "^(mt-|MT-)")
+}
+if (!"percent_ribo" %in% colnames(seurat_obj@meta.data)) {
+seurat_obj$percent_ribo <- PercentageFeatureSet(seurat_obj, pattern = "^(Rps|Rpl|RPS|RPL)")
+}
+
+cells_before <- ncol(seurat_obj)
+
+feature_floor <- unname(quantile(seurat_obj$nFeature_RNA, probs = 0.01, na.rm = TRUE))
+feature_ceiling <- unname(quantile(seurat_obj$nFeature_RNA, probs = 0.99, na.rm = TRUE))
+
+seurat_filtered <- subset(
+seurat_obj,
+subset = nFeature_RNA >= feature_floor &
+nFeature_RNA <= feature_ceiling
+)
+
+tmp_rds <- paste0(rds_out, ".tmp.", Sys.getpid())
+saveRDS(seurat_filtered, file = tmp_rds)
+file.rename(tmp_rds, rds_out)
+
+cells_after <- ncol(seurat_filtered)
+cells_removed <- cells_before - cells_after
+attrition_rate <- (cells_removed / cells_before) * 100
+
+qc_cols <- c("nCount_RNA", "nFeature_RNA", "percent_mito", "percent_ribo")
+qc_df <- seurat_filtered@meta.data[, qc_cols]
+colnames(qc_df) <- c("ncount", "nfeature", "percent_mito", "percent_ribo")
+
+mito_genes <- grep("^(mt-|MT-)", rownames(seurat_filtered), value = TRUE)
+ribo_genes <- grep("^(Rps|Rpl|RPS|RPL)", rownames(seurat_filtered), value = TRUE)
+
+stats_list <- list(
+"total_genes" = c(nrow(seurat_filtered), NA, NA, NA),
+"cells_before" = c(cells_before, NA, NA, NA),
+"cells_retained" = c(cells_after, NA, NA, NA),
+"cells_removed" = c(cells_removed, NA, NA, NA),
+"attrition_rate_pct" = c(round(attrition_rate, 4), NA, NA, NA),
+"feature_floor_1pct" = c(round(feature_floor, 4), NA, NA, NA),
+"feature_ceiling_99pct" = c(round(feature_ceiling, 4), NA, NA, NA),
+"mito_genes" = c(length(mito_genes), NA, NA, NA),
+"ribo_genes" = c(length(ribo_genes), NA, NA, NA),
+"Min." = sapply(qc_df, function(x) min(x, na.rm = TRUE)),
+"1%" = sapply(qc_df, function(x) quantile(x, 0.01, na.rm = TRUE)),
+"2%" = sapply(qc_df, function(x) quantile(x, 0.02, na.rm = TRUE)),
+"3%" = sapply(qc_df, function(x) quantile(x, 0.03, na.rm = TRUE)),
+"1st Qu." = sapply(qc_df, function(x) quantile(x, 0.25, na.rm = TRUE)),
+"Median" = sapply(qc_df, function(x) median(x, na.rm = TRUE)),
+"Mean" = sapply(qc_df, function(x) mean(x, na.rm = TRUE)),
+"3rd Qu." = sapply(qc_df, function(x) quantile(x, 0.75, na.rm = TRUE)),
+"97%" = sapply(qc_df, function(x) quantile(x, 0.97, na.rm = TRUE)),
+"98%" = sapply(qc_df, function(x) quantile(x, 0.98, na.rm = TRUE)),
+"99%" = sapply(qc_df, function(x) quantile(x, 0.99, na.rm = TRUE)),
+"Max." = sapply(qc_df, function(x) max(x, na.rm = TRUE))
+)
+
+mat_out <- do.call(rbind, stats_list)
+res_df <- data.frame(
+statistic = names(stats_list),
+round(mat_out, 4),
+row.names = NULL,
+stringsAsFactors = FALSE
+)
+colnames(res_df) <- c("statistic", "ncount", "nfeature", "percent_mito", "percent_ribo")
+
+write.table(res_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat(rds_out, "\n")
+cat(out_tsv, "\n\n")
+
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+neutrotime_postquantile_features1_99_neutrophils_fine.rds 
+
+# gene attrition check
+```r
+options(width = 800)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(Matrix)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_in <- file.path(work_dir, "neutrotime_postquantile_features1_99_neutrophils_fine.rds")
+out_tsv <- file.path(work_dir, "neutrophil_gene_attrition_thresholds_features1_99.tsv")
+
+seurat_obj <- readRDS(rds_in)
+DefaultAssay(seurat_obj) <- "RNA"
+
+counts_mat <- GetAssayData(seurat_obj, assay = "RNA", layer = "counts")
+total_genes <- nrow(counts_mat)
+total_cells <- ncol(counts_mat)
+
+# calculate nonzero cells per gene
+num_cells_per_gene <- Matrix::rowSums(counts_mat > 0)
+
+cutoffs <- c(3, 5, 10)
+
+attrition_list <- lapply(cutoffs, function(k) {
+genes_retained <- sum(num_cells_per_gene >= k)
+genes_removed <- total_genes - genes_retained
+attrition_pct <- (genes_removed / total_genes) * 100
+data.frame(
+min_cells_threshold = paste0(">=", k, " cells"),
+total_genes = total_genes,
+genes_retained = genes_retained,
+genes_removed = genes_removed,
+gene_attrition_pct = round(attrition_pct, 4),
+stringsAsFactors = FALSE
+)
+})
+
+res_df <- do.call(rbind, attrition_list)
+write.table(res_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat(out_tsv, "\n\n")
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+
+# apply min 10 cells floor
+```r
+options(width = 800)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(Matrix)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_in <- file.path(work_dir, "neutrotime_postquantile_features1_99_neutrophils_fine.rds")
+rds_out <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+out_tsv <- file.path(work_dir, "neutrophil_postQC_final_summary.tsv")
+
+seurat_obj <- readRDS(rds_in)
+DefaultAssay(seurat_obj) <- "RNA"
+
+counts_mat <- GetAssayData(seurat_obj, assay = "RNA", layer = "counts")
+total_genes_before <- nrow(counts_mat)
+total_cells <- ncol(counts_mat)
+
+# identify genes expressed in at least 10 cells
+num_cells_per_gene <- Matrix::rowSums(counts_mat > 0)
+genes_to_keep <- names(num_cells_per_gene[num_cells_per_gene >= 10])
+
+# subset features on seurat object
+seurat_filtered <- seurat_obj[genes_to_keep, ]
+
+tmp_rds <- paste0(rds_out, ".tmp.", Sys.getpid())
+saveRDS(seurat_filtered, file = tmp_rds)
+file.rename(tmp_rds, rds_out)
+
+genes_retained <- nrow(seurat_filtered)
+genes_removed <- total_genes_before - genes_retained
+gene_attrition_pct <- (genes_removed / total_genes_before) * 100
+
+summary_df <- data.frame(
+metric = c(
+"total_cells_retained",
+"genes_before_filter",
+"genes_retained_ge10",
+"genes_removed",
+"gene_attrition_pct"
+),
+value = c(
+total_cells,
+total_genes_before,
+genes_retained,
+genes_removed,
+round(gene_attrition_pct, 4)
+),
+stringsAsFactors = FALSE
+)
+
+write.table(summary_df, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat(rds_out, "\n")
+cat(out_tsv, "\n\n")
+
+print(read.table(out_tsv, header = TRUE, sep = "\t"), row.names = FALSE)
+```
+neutrotime_postQC_neutrophils.rds
+
+# check rds metadata
+```r
+options(width = 120)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_in <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+
+seurat_obj <- readRDS(rds_in)
+
+cat("dimensions (cells x genes):\n")
+cat(ncol(seurat_obj), "cells x", nrow(seurat_obj), "genes\n\n")
+
+meta_cols <- colnames(seurat_obj@meta.data)
+cat("total metadata columns:", length(meta_cols), "\n\n")
+
+print(data.frame(
+index = seq_along(meta_cols),
+column_name = meta_cols,
+data_type = sapply(seurat_obj@meta.data, class),
+stringsAsFactors = FALSE
+), row.names = FALSE)
+```
+
+12845 cells x 9735 genes
+
+# print key metadata
+```r
+options(width = 800)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_in <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+
+seurat_obj <- readRDS(rds_in)
+
+target_cols <- c("sample_id", "dataset", "site", "strain", "sex", "health_status", "is_neutrophil_fine")
+present_cols <- intersect(target_cols, colnames(seurat_obj@meta.data))
+
+unique_samples <- unique(seurat_obj@meta.data[, present_cols, drop = FALSE])
+unique_samples <- unique_samples[order(unique_samples$sample_id), , drop = FALSE]
+
+print(unique_samples, row.names = FALSE)
+```
+
+# clean out main labels immgen 3 columns
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+
+seurat_obj <- readRDS(rds_path)
+
+cols_to_remove <- c("SingleR_ImmGen_main", "SingleR_ImmGen_pruned", "is_neutrophil")
+
+for (col in cols_to_remove) {
+if (col %in% colnames(seurat_obj@meta.data)) {
+seurat_obj@meta.data[[col]] <- NULL
+cat("removed:", col, "\n")
+} else {
+cat("skipped (not found):", col, "\n")
+}
+}
+
+tmp_rds <- paste0(rds_path, ".tmp.", Sys.getpid())
+saveRDS(seurat_obj, file = tmp_rds)
+file.rename(tmp_rds, rds_path)
+
+cat("\nsaved atomically to:", rds_path, "\n\n")
+
+print(data.frame(
+index = seq_along(colnames(seurat_obj@meta.data)),
+column_name = colnames(seurat_obj@meta.data),
+data_type = sapply(seurat_obj@meta.data, class),
+stringsAsFactors = FALSE
+), row.names = FALSE)
+```
+
+```
+saved atomically to: /global/scratch/hpc6297/neutrotime_output/neutrotime_postQC_neutrophils.rds 
+
+ index                column_name data_type
+     1                 orig.ident    factor
+     2                 nCount_RNA   numeric
+     3               nFeature_RNA   integer
+     4                    cell_id character
+     5                raw_barcode character
+     6                  sample_id character
+     7                    dataset character
+     8                       site character
+     9                     strain character
+    10                        sex character
+    11              health_status character
+    12        SingleR_ImmGen_fine character
+    13 SingleR_ImmGen_fine_pruned character
+    14         is_neutrophil_fine   logical
+    15               percent_mito   numeric
+    16               percent_ribo   numeric
+```
+
+# postQC plots
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(patchwork)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+seu <- readRDS(rds_path)
+
+# harmonize column names if needed
+if (!"percent_mito" %in% colnames(seu@meta.data) && "percent.mt" %in% colnames(seu@meta.data)) {
+seu$percent_mito <- seu$percent.mt
+}
+if (!"percent_ribo" %in% colnames(seu@meta.data) && "percent.ribo" %in% colnames(seu@meta.data)) {
+seu$percent_ribo <- seu$percent.ribo
+}
+
+qc_dt <- as.data.table(seu@meta.data)
+qc_dt[, dataset := fifelse(grepl("1", as.character(dataset)), "1", "2")]
+n_cells_str <- format(nrow(qc_dt), big.mark = ",")
+
+set.seed(42)
+qc_dt_shuffled <- qc_dt[sample(nrow(qc_dt))]
+
+palettes <- list(
+dataset = c("1" = "#00C5CD", "2" = "#FF69B4"),
+site = c("bone marrow" = "#D55E00", "peripheral blood" = "#0072B2", "spleen" = "#009E73")
+)
+dark_green <- "#1b4d3e"
+metrics <- c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo")
+
+theme_cfg <- list(
+dpi = 300,
+title_size_violin = 25,
+subtitle_size_violin = 17,
+title_size_scatter = 27,
+subtitle_size_scatter = 18,
+legend_title_size = 15,
+legend_text_size = 15,
+legend_circle_size = 5
+)
+
+base_theme <- theme_classic(base_size = 14) +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5, size = 15),
+plot.subtitle = element_text(hjust = 0.5, size = 12),
+axis.title = element_text(face = "bold", size = 12),
+axis.text = element_text(color = "black", size = 12)
+)
+
+apply_shared_legend <- function(layout_obj, group_var, pos = "right") {
+if (!is.null(group_var)) {
+layout_obj <- layout_obj +
+plot_layout(guides = "collect") &
+theme(
+legend.position = pos,
+legend.title = element_text(face = "bold", size = theme_cfg$legend_title_size),
+legend.text = element_text(size = theme_cfg$legend_text_size)
+) &
+guides(color = guide_legend(title = group_var, override.aes = list(size = theme_cfg$legend_circle_size, alpha = 1)))
+} else {
+layout_obj <- layout_obj & theme(legend.position = "none")
+}
+return(layout_obj)
+}
+
+make_violin_strip <- function(df, group_var = NULL, pal = NULL, row_title = "") {
+plots <- lapply(metrics, function(m) {
+p <- ggplot(df, aes(x = "All Cells", y = .data[[m]]))
+if (is.null(group_var)) {
+p <- p + geom_violin(fill = dark_green, color = "black", trim = FALSE)
+} else {
+p <- p +
+geom_jitter(aes(color = .data[[group_var]]), width = 0.22, size = 0.40, alpha = 0.25, stroke = 0) +
+geom_violin(color = "grey30", fill = NA, width = 0.85, trim = FALSE, linewidth = 0.55) +
+scale_color_manual(values = pal)
+}
+p + labs(title = m, x = NULL, y = NULL) +
+base_theme +
+theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+})
+
+strip <- wrap_plots(plots, nrow = 1)
+strip <- apply_shared_legend(strip, group_var, pos = "right")
+strip + plot_annotation(title = row_title, theme = theme(plot.title = element_text(face = "bold", size = 19, hjust = 0)))
+}
+
+row_v_global <- make_violin_strip(qc_dt, NULL, NULL, "Global")
+row_v_dataset <- make_violin_strip(qc_dt_shuffled, "dataset", palettes$dataset, "By Dataset")
+row_v_site <- make_violin_strip(qc_dt_shuffled, "site", palettes$site, "By Site")
+
+combined_violin_plot <- (row_v_global / row_v_dataset / row_v_site) +
+plot_annotation(
+title = "Comprehensive QC Violin Distributions",
+subtitle = paste0("PostQC Neutrophils (n = ", n_cells_str, ")"),
+theme = theme(
+plot.title = element_text(face = "bold", hjust = 0.5, size = theme_cfg$title_size_violin),
+plot.subtitle = element_text(hjust = 0.5, size = theme_cfg$subtitle_size_violin)
+)
+)
+
+fn_combined_violin <- file.path(work_dir, paste0("neutrotime_qc_combined_violins_", timestamp, ".png"))
+ggsave(fn_combined_violin, combined_violin_plot, width = 16, height = 18, dpi = theme_cfg$dpi)
+
+pairs_list <- list(
+c("nCount_RNA", "nFeature_RNA"),
+c("nCount_RNA", "percent_mito"),
+c("nCount_RNA", "percent_ribo"),
+c("nFeature_RNA", "percent_mito"),
+c("nFeature_RNA", "percent_ribo"),
+c("percent_ribo", "percent_mito")
+)
+
+make_scatter_column <- function(df, group_var = NULL, pal = NULL, col_title = "") {
+sub_plots <- lapply(pairs_list, function(pr) {
+x_val <- df[[pr[1]]]
+y_val <- df[[pr[2]]]
+ct <- cor.test(x_val, y_val, method = "pearson")
+stat_lbl <- paste0("r = ", round(ct$estimate, 2), ", ", fifelse(ct$p.value < 0.01, "p < 0.01", paste("p =", round(ct$p.value, 3))))
+
+p <- ggplot(df, aes(x = .data[[pr[1]]], y = .data[[pr[2]]]))
+if (is.null(group_var)) {
+p <- p + geom_point(color = dark_green, alpha = 0.20, size = 0.70, stroke = 0)
+} else {
+p <- p + geom_point(aes(color = .data[[group_var]]), alpha = 0.30, size = 0.70, stroke = 0) +
+scale_color_manual(values = pal)
+}
+p + labs(title = stat_lbl, x = pr[1], y = pr[2]) +
+base_theme +
+theme(
+axis.title = element_text(face = "bold", size = 14),
+axis.text = element_text(color = "black", size = 12),
+axis.text.x = element_text(angle = 45, hjust = 1),
+plot.title = element_text(face = "plain", size = 16, hjust = 0.5)
+)
+})
+
+col_layout <- wrap_plots(sub_plots, ncol = 1)
+col_layout <- apply_shared_legend(col_layout, group_var, pos = "bottom")
+col_layout + plot_annotation(title = col_title, theme = theme(plot.title = element_text(face = "bold", size = 19, hjust = 0.5)))
+}
+
+col_sc_global <- make_scatter_column(qc_dt, NULL, NULL, "Global")
+col_sc_dataset <- make_scatter_column(qc_dt_shuffled, "dataset", palettes$dataset, "By Dataset")
+col_sc_site <- make_scatter_column(qc_dt_shuffled, "site", palettes$site, "By Site")
+
+combined_scatter_plot <- (col_sc_global | col_sc_dataset | col_sc_site) +
+plot_annotation(
+title = "Comprehensive Pairwise QC Metrics",
+subtitle = paste0("PostQC Neutrophils (n = ", n_cells_str, ")"),
+theme = theme(
+plot.title = element_text(face = "bold", hjust = 0.5, size = theme_cfg$title_size_scatter),
+plot.subtitle = element_text(hjust = 0.5, size = theme_cfg$subtitle_size_scatter)
+)
+)
+
+fn_combined_scatter <- file.path(work_dir, paste0("neutrotime_qc_combined_pairwise_scatters_", timestamp, ".png"))
+ggsave(fn_combined_scatter, combined_scatter_plot, width = 18, height = 22, dpi = theme_cfg$dpi)
+
+all_saved_plots <- c(fn_combined_violin, fn_combined_scatter)
+cat("saved combined plots:\n", paste(all_saved_plots, collapse = "\n"), "\n")
+```
+
+20260908_105717.png    
+
+# SCTransform
+- don't set multithreading to avoid freezing
+
+```r
+options(width = 800)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(future)
+
+# disable forked futures to prevent BLAS/OpenMP mutex deadlocks
+plan(sequential)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils.rds")
+neu <- readRDS(rds_path)
+DefaultAssay(neu) <- "RNA"
+
+# harmonize sample and library columns
+if ("sample_id" %in% colnames(neu@meta.data)) {
+neu$lib_ID <- factor(neu$sample_id)
+} else if (!"lib_ID" %in% colnames(neu@meta.data)) {
+neu$lib_ID <- factor(neu$orig.ident)
+}
+
+if ("site" %in% colnames(neu@meta.data)) {
+neu$lib <- factor(neu$site)
+} else if (!"lib" %in% colnames(neu@meta.data)) {
+neu$lib <- neu$lib_ID
+}
+
+neu$lib_ID <- droplevels(neu$lib_ID)
+neu$lib <- droplevels(neu$lib)
+
+cat("retained libraries:", levels(neu$lib_ID), "\n")
+cat("retained cells:", ncol(neu), "\n\n")
+
+cat("running SCTransform v2...\n")
+neu <- SCTransform(
+neu,
+assay = "RNA",
+new.assay.name = "SCT",
+vst.flavor = "v2",
+min_cells = 5,
+vars.to.regress = NULL,
+verbose = TRUE
+)
+
+rna_feats <- nrow(GetAssayData(neu, assay = "RNA", layer = "counts"))
+sct_counts_feats <- nrow(GetAssayData(neu, assay = "SCT", layer = "counts"))
+sct_data_feats <- nrow(GetAssayData(neu, assay = "SCT", layer = "data"))
+sct_scale_feats <- nrow(GetAssayData(neu, assay = "SCT", layer = "scale.data"))
+sct_hvgs <- length(VariableFeatures(neu, assay = "SCT"))
+
+cat("\nRNA assay features:", rna_feats, "\n")
+cat("SCT assay counts features:", sct_counts_feats, "\n")
+cat("SCT assay data features:", sct_data_feats, "\n")
+cat("SCT assay scale.data features:", sct_scale_feats, "\n")
+cat("SCT top HVGs selected:", sct_hvgs, "\n\n")
+
+out_rds <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+tmp_rds <- paste0(out_rds, ".tmp.", Sys.getpid())
+saveRDS(neu, tmp_rds)
+file.rename(tmp_rds, out_rds)
+cat("sctransformed neutrophil object saved to:", out_rds, "\n\n")
+
+scale_mat <- GetAssayData(neu, assay = "SCT", layer = "scale.data")
+hvg_n <- nrow(scale_mat)
+
+global_vals <- as.numeric(scale_mat)
+global_res <- data.frame(
+Min = round(min(global_vals), 5),
+Q1 = round(as.numeric(quantile(global_vals, 0.25)), 5),
+Median = round(median(global_vals), 5),
+Mean = round(mean(global_vals), 5),
+Q3 = round(as.numeric(quantile(global_vals, 0.75)), 5),
+Max = round(max(global_vals), 5)
+)
+
+cat("overall sct scale.data residual summary:\n")
+print(global_res, row.names = FALSE)
+
+lib_ids <- as.character(neu$lib_ID)
+lib_names <- as.character(neu$lib)
+
+if ("nCount_SCT" %in% colnames(neu@meta.data)) {
+sct_umi <- as.numeric(neu$nCount_SCT)
+sct_feat <- as.numeric(neu$nFeature_SCT)
+} else {
+sct_counts <- GetAssayData(neu, assay = "SCT", layer = "counts")
+sct_umi <- as.numeric(colSums(sct_counts))
+sct_feat <- as.numeric(colSums(sct_counts > 0))
+}
+
+unique_libs <- unique(lib_ids)
+
+summary_rows <- lapply(unique_libs, function(l) {
+cell_idx <- which(lib_ids == l)
+vals <- as.numeric(scale_mat[, cell_idx, drop = FALSE])
+
+data.frame(
+lib_ID = l,
+sample = lib_names[cell_idx[1]],
+total_cells = length(cell_idx),
+hvg_in_scaledata = hvg_n,
+median_corrected_umi = round(median(sct_umi[cell_idx]), 1),
+median_corrected_features = round(median(sct_feat[cell_idx]), 1),
+res_Min = round(min(vals), 5),
+res_Q1 = round(as.numeric(quantile(vals, 0.25)), 5),
+res_Median = round(median(vals), 5),
+res_Mean = round(mean(vals), 5),
+res_Q3 = round(as.numeric(quantile(vals, 0.75)), 5),
+res_Max = round(max(vals), 5),
+stringsAsFactors = FALSE
+)
+})
+
+combined_summary <- do.call(rbind, summary_rows)
+
+cat("\nconsolidated sct diagnostic summary:\n")
+options(max.print = 500)
+print(combined_summary)
+
+out_tsv <- file.path(work_dir, "neutrotime_neutrophils_SCT_combined_summary.tsv")
+write.table(combined_summary, file = out_tsv, sep = "\t", quote = FALSE, row.names = FALSE)
+cat("\ncombined summary saved to:", out_tsv, "\n")
+```
+
+```
+retained libraries: GSM5029335_BL_dataset1.txt.gz GSM5029336_BM_dataset1.txt.gz GSM5029337_SP_dataset1.txt.gz GSM5029338_BL_dataset2.txt.gz GSM5029339_BM_dataset2.txt.gz GSM5029340_SP_dataset2.txt.gz 
+retained cells: 12845 
+
+running SCTransform v2...
+Running SCTransform on assay: RNA
+vst.flavor='v2' set. Using model with fixed slope and excluding poisson genes.
+Calculating cell attributes from input UMI matrix: log_umi
+Variance stabilizing transformation of count matrix of size 9735 by 12845
+Model formula is y ~ log_umi
+Get Negative Binomial regression parameters per gene
+Using 2000 genes, 5000 cells
+Found 358 outliers - those will be ignored in fitting/regularization step
+
+Second step: Get residuals using fitted parameters for 9735 genes
+Computing corrected count matrix for 9735 genes
+Calculating gene attributes
+Wall clock passed: Time difference of 35.13214 secs
+Determine variable features
+Centering data matrix
+
+Set default assay to SCT
+
+RNA assay features: 9735 
+SCT assay counts features: 9735 
+SCT assay data features: 9735 
+SCT assay scale.data features: 3000 
+SCT top HVGs selected: 3000 
+
+[1] TRUE
+sctransformed neutrophil object saved to: /global/scratch/hpc6297/neutrotime_output/neutrotime_postQC_neutrophils_SCT.rds 
+
+overall sct scale.data residual summary:
+      Min       Q1   Median Mean       Q3     Max
+ -4.48685 -0.36132 -0.23887    0 -0.12964 20.7146
+
+consolidated sct diagnostic summary:
+                         lib_ID           sample total_cells hvg_in_scaledata median_corrected_umi median_corrected_features  res_Min   res_Q1 res_Median res_Mean   res_Q3  res_Max
+1 GSM5029335_BL_dataset1.txt.gz peripheral blood        1343             3000                949.0                       364 -4.47493 -0.31385   -0.20456  0.04217 -0.11130 20.68878
+2 GSM5029336_BM_dataset1.txt.gz      bone marrow        1151             3000               1198.0                       442 -4.32677 -0.45460   -0.31741 -0.09446 -0.21734 20.70423
+3 GSM5029337_SP_dataset1.txt.gz           spleen        1154             3000               1072.5                       393 -4.32156 -0.40413   -0.26670 -0.02639 -0.14691 20.70423
+4 GSM5029338_BL_dataset2.txt.gz peripheral blood        3819             3000                956.0                       376 -4.48685 -0.30363   -0.20024  0.05051 -0.11550 20.70142
+5 GSM5029339_BM_dataset2.txt.gz      bone marrow        3321             3000               1202.0                       464 -4.38417 -0.41928   -0.29233 -0.07166 -0.20419 20.71460
+6 GSM5029340_SP_dataset2.txt.gz           spleen        2057             3000                934.0                       370 -4.36107 -0.29643   -0.19179  0.06205 -0.10989 20.69828
+
+combined summary saved to: /global/scratch/hpc6297/neutrotime_output/neutrotime_neutrophils_SCT_combined_summary.tsv 
+```
 
 
-# sessioninfo()
+
