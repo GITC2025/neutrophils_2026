@@ -2133,5 +2133,863 @@ consolidated sct diagnostic summary:
 combined summary saved to: /global/scratch/hpc6297/neutrotime_output/neutrotime_neutrophils_SCT_combined_summary.tsv 
 ```
 
+# SCT before and after
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+neu <- readRDS(rds_path)
+
+meta <- neu@meta.data
+
+# identify sample column
+sample_col <- if ("sample_id" %in% colnames(meta)) {
+"sample_id"
+} else if ("lib_ID" %in% colnames(meta)) {
+"lib_ID"
+} else {
+"orig.ident"
+}
+
+samples <- unique(meta[[sample_col]])
+
+comparison_df <- do.call(rbind, lapply(samples, function(s) {
+idx <- which(meta[[sample_col]] == s)
+data.frame(
+sample_id = s,
+orig_median_umi = round(median(meta$nCount_RNA[idx]), 1),
+corrected_median_umi = round(median(meta$nCount_SCT[idx]), 1),
+orig_median_features = round(median(meta$nFeature_RNA[idx]), 1),
+corrected_median_features = round(median(meta$nFeature_SCT[idx]), 1),
+stringsAsFactors = FALSE
+)
+}))
+
+print(comparison_df, row.names = FALSE)
+```
+
+# populate metadata with SCT assay
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+neu <- readRDS(rds_path)
+
+# populate sct count and feature metadata
+sct_counts <- GetAssayData(neu, assay = "SCT", layer = "counts")
+neu$nCount_SCT <- as.numeric(colSums(sct_counts))
+neu$nFeature_SCT <- as.integer(colSums(sct_counts > 0))
+rm(sct_counts)
+
+tmp_rds <- paste0(rds_path, ".tmp.", Sys.getpid())
+saveRDS(neu, file = tmp_rds)
+file.rename(tmp_rds, rds_path)
+
+cat("atomically updated and saved:", rds_path, "\n")
+```
+
+# ccgenes conversion
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(stringr)
+
+rds_in <- "/global/scratch/hpc6297/neutrotime_output/neutrotime_postQC_neutrophils_SCT.rds"
+seurat_obj <- readRDS(rds_in)
+
+meta_before <- colnames(seurat_obj@meta.data)
+
+s_all <- str_to_title(cc.genes.updated.2019$s.genes)
+g2m_all <- str_to_title(cc.genes.updated.2019$g2m.genes)
+sct_genes <- rownames(GetAssayData(seurat_obj, assay = "SCT", layer = "data"))
+
+s_genes <- intersect(s_all, sct_genes)
+g2m_genes <- intersect(g2m_all, sct_genes)
+
+cat("features matched in sct data layer:\n")
+cat("s phase:", length(s_genes), "of", length(s_all), "\n")
+cat("g2m phase:", length(g2m_genes), "of", length(g2m_all), "\n\n")
+
+seurat_obj <- CellCycleScoring(
+seurat_obj,
+s.features = s_genes,
+g2m.features = g2m_genes,
+assay = "SCT",
+layer = "data",
+set.ident = FALSE
+)
+
+tmp_rds <- paste0(rds_in, ".tmp.", Sys.getpid())
+saveRDS(seurat_obj, file = tmp_rds, compress = FALSE)
+file.rename(tmp_rds, rds_in)
+
+new_cols <- setdiff(colnames(seurat_obj@meta.data), meta_before)
+target_cols <- if (length(new_cols) > 0) new_cols else c("S.Score", "G2M.Score", "Phase")
+
+print(data.frame(
+column = target_cols,
+type = sapply(seurat_obj@meta.data[, target_cols], class),
+stringsAsFactors = FALSE
+), row.names = FALSE)
+
+cat("\n")
+print(table(seurat_obj$Phase))
+```
+
+# PCA, Integration, Clustering function bundle
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+options(width = 800)
+
+library(Seurat)
+library(harmony)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(viridis)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+merged_rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+fn_bundle_path <- file.path(work_dir, "neutrotime_PCA_integration_clustering.RData")
+tstamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+save_rds_atomic <- function(object, file_path, compress = FALSE) {
+tmp_file <- paste0(file_path, ".tmp.", Sys.getpid())
+saveRDS(object, file = tmp_file, compress = compress)
+file.rename(tmp_file, file_path)
+}
+
+saved_paths <- c()
+
+# 1. modular pipeline functions
+
+render_pca_diagnostics <- function(merged_obj, out_path) {
+pca_embed <- as.data.frame(Embeddings(merged_obj, reduction = "pca")[, 1:2])
+colnames(pca_embed) <- c("PC1", "PC2")
+pca_df <- cbind(pca_embed, merged_obj@meta.data)
+
+set.seed(123)
+pca_df_shuffled <- pca_df[sample(nrow(pca_df)), ]
+
+pca_theme <- theme_bw() +
+theme(
+plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+axis.title = element_text(size = 12, face = "bold"),
+legend.title = element_text(size = 13, face = "bold"),
+legend.text = element_text(size = 12),
+panel.grid.minor = element_blank()
+)
+
+# row 1: discrete biological covariates
+p_cc <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = Phase)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = "Cell Cycle Phase", color = "Phase") +
+pca_theme
+
+p_sample <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = short_sample_id)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = "Sample ID", color = "Sample") +
+pca_theme
+
+p_site <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = site)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = "Anatomical Site", color = "Site") +
+pca_theme
+
+# row 2: sequencing depth and complexity
+p_depth <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = nCount_RNA)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", labels = label_comma()) +
+labs(title = "Depth (nCount_RNA)", color = "nCount_RNA") +
+pca_theme
+
+p_complex <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = nFeature_RNA)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", labels = label_comma()) +
+labs(title = "Complexity (nFeature_RNA)", color = "nFeature_RNA") +
+pca_theme
+
+p_spacer <- ggplot() + theme_void()
+
+# row 3: technical qc metrics (mito and ribo)
+mito_col <- if ("percent_mito" %in% colnames(pca_df)) "percent_mito" else "percent.mt"
+p_mito <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = .data[[mito_col]])) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "magma") +
+labs(title = "Mitochondrial %", color = "percent_mito") +
+pca_theme
+
+ribo_col <- if ("percent_ribo" %in% colnames(pca_df)) "percent_ribo" else "percent.ribo"
+p_ribo <- ggplot(pca_df_shuffled, aes(x = PC1, y = PC2, color = .data[[ribo_col]])) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis") +
+labs(title = "Ribosomal %", color = "percent_ribo") +
+pca_theme
+
+p_spacer2 <- ggplot() + theme_void()
+
+pca_diag_grid <- (p_cc | p_sample | p_site) /
+(p_depth | p_complex | p_spacer) /
+(p_mito | p_ribo | p_spacer2) +
+plot_annotation(
+title = "Neutrotime PCA Diagnostics: Biological & Technical Covariates",
+theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(t = 10, b = 15)))
+)
+
+ggsave(out_path, plot = pca_diag_grid, width = 16, height = 15, dpi = 300)
+return(out_path)
+}
+
+render_umap_qc_diagnostics <- function(merged_obj, out_path) {
+umap_embed <- as.data.frame(Embeddings(merged_obj, reduction = "umap"))
+colnames(umap_embed) <- c("umap_1", "umap_2")
+plot_meta <- cbind(umap_embed, merged_obj@meta.data)
+
+set.seed(123)
+plot_meta_shuffled <- plot_meta[sample(nrow(plot_meta)), ]
+
+qc_umap_theme <- theme_classic() +
+theme(
+plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+axis.title = element_text(size = 11, face = "bold"),
+axis.text = element_text(size = 10),
+legend.title = element_text(size = 13, face = "bold"),
+legend.text = element_text(size = 12)
+)
+
+p_u_nfeat <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = nFeature_RNA)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", name = "Value", labels = label_comma()) +
+labs(title = "nFeature (RNA)") +
+qc_umap_theme
+
+p_u_ncount <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = nCount_RNA)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", name = "Value", labels = label_comma()) +
+labs(title = "nCount (RNA)") +
+qc_umap_theme
+
+mito_col <- if ("percent_mito" %in% colnames(plot_meta)) "percent_mito" else "percent.mt"
+p_u_mt <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = .data[[mito_col]])) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", name = "Value") +
+labs(title = "Mitochondrial %") +
+qc_umap_theme
+
+ribo_col <- if ("percent_ribo" %in% colnames(plot_meta)) "percent_ribo" else "percent.ribo"
+p_u_ribo <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = .data[[ribo_col]])) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+scale_color_viridis_c(option = "viridis", name = "Value") +
+labs(title = "Ribosomal %") +
+qc_umap_theme
+
+umap_qc_grid <- (p_u_nfeat | p_u_ncount) / (p_u_mt | p_u_ribo) +
+plot_annotation(
+title = "Neutrotime Harmony UMAP - Technical QC Metrics",
+theme = theme(plot.title = element_text(size = 17, face = "bold", hjust = 0.5, margin = margin(t = 10, b = 15)))
+)
+
+ggsave(out_path, plot = umap_qc_grid, width = 12, height = 11, dpi = 300, bg = "white")
+return(out_path)
+}
+
+# layout order: clusters (left), site (middle), sample (right)
+render_cluster_resolutions <- function(merged_obj, resolutions, out_dir, tstamp) {
+umap_embed <- as.data.frame(Embeddings(merged_obj, reduction = "umap"))
+colnames(umap_embed) <- c("umap_1", "umap_2")
+plot_meta <- cbind(umap_embed, merged_obj@meta.data)
+
+umap_theme <- theme_classic() +
+theme(
+plot.title = element_text(size = 15, face = "bold", hjust = 0.5),
+axis.title = element_text(size = 12, face = "bold"),
+axis.text = element_text(size = 10),
+legend.title = element_text(size = 13, face = "bold"),
+legend.text = element_text(size = 12)
+)
+
+paths <- c()
+
+set.seed(123)
+plot_meta_shuffled <- plot_meta[sample(nrow(plot_meta)), ]
+
+for (res in resolutions) {
+cluster_col <- sprintf("SCT_snn_res.%s", res)
+plot_meta$current_cluster <- factor(plot_meta[[cluster_col]])
+plot_meta_shuffled$current_cluster <- factor(plot_meta_shuffled[[cluster_col]])
+
+centroids <- aggregate(cbind(umap_1, umap_2) ~ current_cluster, data = plot_meta, FUN = median)
+
+p_clust <- ggplot(plot_meta, aes(x = umap_1, y = umap_2, color = current_cluster)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+geom_text(data = centroids, aes(x = umap_1, y = umap_2, label = current_cluster), color = "black", size = 4.5, fontface = "bold") +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = sprintf("Leiden Clusters - Res: %s", res), color = "Cluster") +
+umap_theme
+
+p_site_dist <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = site)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = "Site Distribution", color = "Site") +
+umap_theme
+
+p_sample_dist <- ggplot(plot_meta_shuffled, aes(x = umap_1, y = umap_2, color = short_sample_id)) +
+geom_point(size = 0.65, alpha = 0.60, stroke = 0) +
+guides(color = guide_legend(override.aes = list(size = 3.5, alpha = 1))) +
+labs(title = "Sample Distribution", color = "Sample") +
+umap_theme
+
+combined_res_plot <- (p_clust | p_site_dist | p_sample_dist) +
+plot_annotation(
+title = sprintf("Neutrotime Harmony Integrated UMAP: Leiden Resolution %s", res),
+theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(t = 10, b = 15)))
+)
+
+res_plot_path <- file.path(out_dir, sprintf("neutrotime_harmony_leiden_res_%s_%s.png", res, tstamp))
+ggsave(res_plot_path, plot = combined_res_plot, width = 18, height = 5.5, dpi = 300, bg = "white")
+paths <- c(paths, res_plot_path)
+}
+return(paths)
+}
+
+# 2. save function bundle
+save(
+render_pca_diagnostics,
+render_umap_qc_diagnostics,
+render_cluster_resolutions,
+file = fn_bundle_path
+)
+saved_paths <- c(saved_paths, fn_bundle_path)
+
+cat("functions saved in bundle:\n")
+print(c("render_pca_diagnostics", "render_umap_qc_diagnostics", "render_cluster_resolutions"))
+cat("\n")
+
+# 3. execution pipeline
+
+merged_obj <- readRDS(merged_rds_path)
+DefaultAssay(merged_obj) <- "SCT"
+
+# construct short_sample_id metadata and save atomically if not present
+if (!"short_sample_id" %in% colnames(merged_obj@meta.data)) {
+tissue_code <- sub(".*_(BL|BM|SP)_.*", "\\1", merged_obj$sample_id)
+dataset_num <- sub(".*_dataset([0-9]+).*", "\\1", merged_obj$sample_id)
+merged_obj$short_sample_id <- factor(paste0(tissue_code, "_", dataset_num))
+save_rds_atomic(merged_obj, file_path = merged_rds_path, compress = FALSE)
+cat("short_sample_id created and atomically saved to metadata\n")
+}
+
+# confirm cell cycle metadata presence
+cat("cell cycle annotations verified in metadata:\n")
+print(table(merged_obj$Phase))
+
+if (!"percent_mito" %in% colnames(merged_obj@meta.data)) {
+merged_obj$percent_mito <- PercentageFeatureSet(merged_obj, assay = "RNA", pattern = "^(mt-|MT-)")
+}
+
+if (!"percent_ribo" %in% colnames(merged_obj@meta.data)) {
+merged_obj$percent_ribo <- PercentageFeatureSet(merged_obj, assay = "RNA", pattern = "^(Rps|Rpl|RPS|RPL)")
+}
+
+# pca
+cat("running pca\n")
+pca_features <- VariableFeatures(merged_obj, assay = "SCT")
+merged_obj <- RunPCA(
+merged_obj,
+assay = "SCT",
+features = pca_features,
+npcs = 30,
+verbose = FALSE
+)
+
+# pca diagnostics plot
+pca_diag_path <- file.path(work_dir, sprintf("neutrotime_pca_diagnostics_%s.png", tstamp))
+render_pca_diagnostics(merged_obj, pca_diag_path)
+saved_paths <- c(saved_paths, pca_diag_path)
+
+# pc dim heatmap
+dimheat_path <- file.path(work_dir, sprintf("neutrotime_pca_dimheatmap_%s.png", tstamp))
+png(dimheat_path, width = 16, height = 10, units = "in", res = 300)
+DimHeatmap(
+merged_obj,
+dims = 1:6,
+nfeatures = 30,
+reduction = "pca",
+balanced = TRUE,
+fast = FALSE
+)
+dev.off()
+saved_paths <- c(saved_paths, dimheat_path)
+
+# harmony integration
+cat("executing harmony integration\n")
+conv_png <- file.path(work_dir, sprintf("neutrotime_harmony_convergence_%s.png", tstamp))
+png(conv_png, width = 7, height = 5, units = "in", res = 300)
+
+merged_obj <- RunHarmony(
+object = merged_obj,
+group.by.vars = "sample_id",
+reduction.use = "pca",
+dims.use = 1:30,
+reduction.save = "harmony",
+max_iter = 10,
+early_stop = TRUE,
+plot_convergence = TRUE,
+verbose = FALSE
+)
+dev.off()
+saved_paths <- c(saved_paths, conv_png)
+
+# harmony performance evaluation plot
+p_dim <- DimPlot(merged_obj, reduction = "harmony", group.by = "site", pt.size = 0.65, alpha = 0.60) +
+ggtitle("Harmony Embeddings (Site)")
+
+p_vln <- VlnPlot(merged_obj, features = "harmony_1", group.by = "short_sample_id", pt.size = 0.65, alpha = 0.60) +
+ggtitle("Harmony PC1 Distribution") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+perf_plot <- (p_dim + p_vln) +
+plot_annotation(title = "Neutrotime: Harmony Integration Performance")
+
+perf_plot_path <- file.path(work_dir, sprintf("neutrotime_harmony_performance_eval_%s.png", tstamp))
+ggsave(perf_plot_path, plot = perf_plot, width = 14, height = 6, dpi = 300, bg = "white")
+saved_paths <- c(saved_paths, perf_plot_path)
+
+# neighbors, umap, multiresolution leiden clustering
+cat("computing neighbors and umap on harmony reduction\n")
+merged_obj <- FindNeighbors(merged_obj, reduction = "harmony", dims = 1:30, verbose = FALSE)
+merged_obj <- RunUMAP(merged_obj, reduction = "harmony", dims = 1:30, seed.use = 123, verbose = FALSE)
+
+resolutions <- c(0.4, 0.5, 0.6, 0.8, 1.0, 1.2)
+cat("executing multiresolution leiden clustering\n")
+
+for (res in resolutions) {
+merged_obj <- FindClusters(
+merged_obj,
+resolution = res,
+algorithm = 4,
+random.seed = 123L,
+verbose = FALSE
+)
+}
+
+Idents(merged_obj) <- paste0("SCT_snn_res.", resolutions[length(resolutions)])
+
+# save clustering manifolds & embeddings to tsv
+umap_embed <- as.data.frame(Embeddings(merged_obj, reduction = "umap"))
+colnames(umap_embed) <- c("umap_1", "umap_2")
+harmony_embed <- as.data.frame(Embeddings(merged_obj, reduction = "harmony"))
+colnames(harmony_embed) <- paste0("harmony_", 1:ncol(harmony_embed))
+
+cluster_col_names <- sprintf("SCT_snn_res.%s", resolutions)
+meta_subset_cols <- intersect(c("sample_id", "short_sample_id", "site", "strain", "sex", "health_status", "S.Score", "G2M.Score", "Phase", cluster_col_names), colnames(merged_obj@meta.data))
+
+manifold_df <- cbind(
+data.frame(cell = rownames(merged_obj@meta.data), stringsAsFactors = FALSE),
+umap_embed,
+harmony_embed[, 1:10],
+merged_obj@meta.data[, meta_subset_cols]
+)
+
+manifold_tsv_path <- file.path(work_dir, sprintf("neutrotime_clustering_manifolds_%s.tsv", tstamp))
+write.table(manifold_df, file = manifold_tsv_path, sep = "\t", quote = FALSE, row.names = FALSE)
+saved_paths <- c(saved_paths, manifold_tsv_path)
+
+# umap technical qc diagnostic plot
+umap_qc_path <- file.path(work_dir, sprintf("neutrotime_umap_qc_diagnostics_%s.png", tstamp))
+render_umap_qc_diagnostics(merged_obj, umap_qc_path)
+saved_paths <- c(saved_paths, umap_qc_path)
+
+# cluster resolution plots
+res_paths <- render_cluster_resolutions(merged_obj, resolutions, work_dir, tstamp)
+saved_paths <- c(saved_paths, res_paths)
+
+# final atomic rds save with integrated manifold and clusters
+save_rds_atomic(merged_obj, file_path = merged_rds_path, compress = FALSE)
+saved_paths <- c(saved_paths, merged_rds_path)
+
+cat("all saved file paths:\n")
+for (p in saved_paths) {
+cat(sprintf("%s\n", p))
+}
+
+rm(merged_obj, manifold_df)
+invisible(gc())
+```
 
 
+/neutrotime_output/neutrotime_PCA_integration_clustering.RData
+20260908_120912.png
+
+
+# rotate the UMAPs
+- rotation and aesthetic changes only - underlying clustering remains the same 
+```R
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+options(width = 800)
+
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(viridis)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+fn_bundle_path <- file.path(work_dir, "neutrotime_PCA_integration_clustering.RData")
+merged_rds_path <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+tstamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# load pre-saved plotting functions
+load(fn_bundle_path)
+
+save_rds_atomic <- function(object, file_path, compress = FALSE) {
+tmp_file <- paste0(file_path, ".tmp.", Sys.getpid())
+saveRDS(object, file = tmp_file, compress = compress)
+file.rename(tmp_file, file_path)
+}
+
+saved_paths <- c()
+
+cat("loading target seurat object:", merged_rds_path, "\n")
+merged_obj <- readRDS(merged_rds_path)
+DefaultAssay(merged_obj) <- "SCT"
+
+# recompute umap with layout widening
+cat("recomputing umap with layout widening (min.dist = 0.55, spread = 1.4)...\n")
+merged_obj <- RunUMAP(
+merged_obj,
+reduction = "harmony",
+dims = 1:30,
+n.neighbors = 45,
+min.dist = 0.55,
+spread = 1.4,
+seed.use = 123,
+verbose = FALSE
+)
+
+# apply orientation transform (90 deg CCW rotation + vertical reflection)
+raw_coords <- Embeddings(merged_obj, reduction = "umap")
+transformed_coords <- cbind(
+umap_1 = -raw_coords[, 2],
+umap_2 = -raw_coords[, 1]
+)
+rownames(transformed_coords) <- rownames(raw_coords)
+colnames(transformed_coords) <- c("umap_1", "umap_2")
+
+merged_obj[["umap"]] <- CreateDimReducObject(
+embeddings = transformed_coords,
+key = "umap_",
+assay = DefaultAssay(merged_obj)
+)
+
+resolutions <- c(0.4, 0.5, 0.6, 0.8, 1.0, 1.2)
+
+# update and save clustering manifolds to tsv
+umap_embed <- as.data.frame(Embeddings(merged_obj, reduction = "umap"))
+colnames(umap_embed) <- c("umap_1", "umap_2")
+harmony_embed <- as.data.frame(Embeddings(merged_obj, reduction = "harmony"))
+colnames(harmony_embed) <- paste0("harmony_", 1:ncol(harmony_embed))
+
+cluster_col_names <- sprintf("SCT_snn_res.%s", resolutions)
+meta_subset_cols <- intersect(
+c("sample_id", "short_sample_id", "site", "strain", "sex", "health_status", "S.Score", "G2M.Score", "Phase", cluster_col_names),
+colnames(merged_obj@meta.data)
+)
+
+manifold_df <- cbind(
+data.frame(cell = rownames(merged_obj@meta.data), stringsAsFactors = FALSE),
+umap_embed,
+harmony_embed[, 1:10],
+merged_obj@meta.data[, meta_subset_cols]
+)
+
+manifold_tsv_path <- file.path(work_dir, sprintf("neutrotime_clustering_manifolds_widened_%s.tsv", tstamp))
+write.table(manifold_df, file = manifold_tsv_path, sep = "\t", quote = FALSE, row.names = FALSE)
+saved_paths <- c(saved_paths, manifold_tsv_path)
+
+# render umap qc diagnostics plot
+umap_qc_path <- file.path(work_dir, sprintf("neutrotime_umap_qc_diagnostics_widened_%s.png", tstamp))
+render_umap_qc_diagnostics(merged_obj, umap_qc_path)
+saved_paths <- c(saved_paths, umap_qc_path)
+
+# render cluster resolution plots
+res_paths <- render_cluster_resolutions(merged_obj, resolutions, work_dir, paste0("widened_", tstamp))
+saved_paths <- c(saved_paths, res_paths)
+
+# atomic save of updated seurat object
+save_rds_atomic(merged_obj, file_path = merged_rds_path, compress = FALSE)
+saved_paths <- c(saved_paths, merged_rds_path)
+
+cat("\nall saved file paths:\n")
+for (p in saved_paths) {
+cat(sprintf("%s\n", p))
+}
+
+rm(merged_obj, manifold_df)
+invisible(gc())
+```
+
+# ID outliers res 0.8
+
+```r
+options(width = 200)
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+library(Seurat)
+library(presto)
+
+format_tight_aligned <- function(df) {
+if (is.null(df) || nrow(df) == 0) return(df)
+df_out <- df
+num_cols <- sapply(df_out, is.numeric)
+num_cols["rank"] <- FALSE
+df_out[num_cols] <- lapply(df_out[num_cols], function(x) sprintf("%.3f", x))
+
+new_colnames <- c()
+for (col in colnames(df_out)) {
+vals <- as.character(df_out[[col]])
+max_w <- max(nchar(c(col, vals)), na.rm = TRUE)
+df_out[[col]] <- sprintf(paste0("%", max_w, "s"), vals)
+new_colnames <- c(new_colnames, sprintf(paste0("%", max_w, "s"), col))
+}
+colnames(df_out) <- new_colnames
+return(df_out)
+}
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+target_file <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+
+cat("loading target integrated object:", target_file, "\n")
+neu <- readRDS(target_file)
+DefaultAssay(neu) <- "SCT"
+
+res_col <- "SCT_snn_res.0.8"
+if (!res_col %in% colnames(neu@meta.data)) {
+stop(paste("metadata column", res_col, "not found in object"))
+}
+
+target_groups <- c("14", "15", "16", "17", "18")
+cat("calculating markers for clusters:", paste(target_groups, collapse = ", "), "\n")
+
+presto_df <- wilcoxauc(neu, group_by = res_col, assay = "data", seurat_assay = "SCT")
+presto_subset <- presto_df[as.character(presto_df$group) %in% target_groups, ]
+
+saved_paths <- c()
+
+# 1. wilcoxon markers
+w_df <- presto_subset[presto_subset$logFC > 0 & presto_subset$padj < 0.05, ]
+if (nrow(w_df) > 0) {
+w_df <- w_df[order(w_df$group, -w_df$logFC), ]
+w_df$rank <- as.integer(ave(w_df$logFC, w_df$group, FUN = seq_along))
+
+markers_wilcox <- data.frame(
+rank = w_df$rank,
+gene = w_df$feature,
+group = w_df$group,
+avg_log2FC = w_df$logFC,
+pct.1 = w_df$pct_in,
+pct.2 = w_df$pct_out,
+p_val = w_df$pval,
+p_val_adj = w_df$padj,
+stringsAsFactors = FALSE
+)
+
+consolidated_w_path <- file.path(work_dir, paste0("UMAP_outliers_0.8_wilcox_top30_consolidated_", timestamp, ".tsv"))
+if (file.exists(consolidated_w_path)) file.remove(consolidated_w_path)
+
+for (g_id in target_groups) {
+sub_w <- markers_wilcox[markers_wilcox$group == g_id, ]
+if (nrow(sub_w) == 0) next
+
+sub_w_out <- format_tight_aligned(sub_w)
+header_txt <- paste0("# Group: ", g_id, " Wilcoxon\n")
+
+w_path <- file.path(work_dir, paste0("UMAP_outliers_0.8_wilcox_cluster_", g_id, "_", timestamp, ".tsv"))
+cat(header_txt, file = w_path)
+write.table(sub_w_out, file = w_path, append = TRUE, sep = " ", quote = FALSE, row.names = FALSE)
+saved_paths <- c(saved_paths, w_path)
+
+top30_w <- head(sub_w, 30)
+top30_w_out <- format_tight_aligned(top30_w)
+header_consolidated <- paste0("# Group: ", g_id, " Top 30 Wilcoxon\n")
+
+cat(header_consolidated, file = consolidated_w_path, append = TRUE)
+write.table(top30_w_out, file = consolidated_w_path, append = TRUE, sep = " ", quote = FALSE, row.names = FALSE)
+cat("\n", file = consolidated_w_path, append = TRUE)
+}
+
+full_w_path <- file.path(work_dir, paste0("UMAP_outliers_0.8_", timestamp, ".tsv"))
+write.table(markers_wilcox, file = full_w_path, sep = "\t", quote = FALSE, row.names = FALSE)
+saved_paths <- c(saved_paths, full_w_path, consolidated_w_path)
+cat("saved consolidated wilcoxon top 30 to:", consolidated_w_path, "\n")
+cat("saved full outlier wilcoxon tsv to:", full_w_path, "\n")
+}
+
+# 2. roc markers
+r_df <- presto_subset[presto_subset$auc > 0.5, ]
+if (nrow(r_df) > 0) {
+r_df$power <- (r_df$auc - 0.5) * 2
+r_df <- r_df[order(r_df$group, -r_df$power), ]
+r_df$rank <- as.integer(ave(r_df$power, r_df$group, FUN = seq_along))
+
+markers_roc <- data.frame(
+rank = r_df$rank,
+gene = r_df$feature,
+group = r_df$group,
+power = r_df$power,
+myAUC = r_df$auc,
+avg_diff = r_df$logFC,
+stringsAsFactors = FALSE
+)
+
+consolidated_r_path <- file.path(work_dir, paste0("UMAP_outliers_0.8_roc_top30_consolidated_", timestamp, ".tsv"))
+if (file.exists(consolidated_r_path)) file.remove(consolidated_r_path)
+
+for (g_id in target_groups) {
+sub_r <- markers_roc[markers_roc$group == g_id, ]
+if (nrow(sub_r) == 0) next
+
+sub_r_out <- format_tight_aligned(sub_r)
+header_txt <- paste0("# Group: ", g_id, " ROC\n")
+
+r_path <- file.path(work_dir, paste0("UMAP_outliers_0.8_roc_cluster_", g_id, "_", timestamp, ".tsv"))
+cat(header_txt, file = r_path)
+write.table(sub_r_out, file = r_path, append = TRUE, sep = " ", quote = FALSE, row.names = FALSE)
+saved_paths <- c(saved_paths, r_path)
+
+top30_r <- head(sub_r, 30)
+top30_r_out <- format_tight_aligned(top30_r)
+header_consolidated <- paste0("# Group: ", g_id, " Top 30 ROC\n")
+
+cat(header_consolidated, file = consolidated_r_path, append = TRUE)
+write.table(top30_r_out, file = consolidated_r_path, append = TRUE, sep = " ", quote = FALSE, row.names = FALSE)
+cat("\n", file = consolidated_r_path, append = TRUE)
+}
+
+saved_paths <- c(saved_paths, consolidated_r_path)
+cat("saved consolidated roc top 30 to:", consolidated_r_path, "\n")
+}
+
+cat("\nprocessing complete. all saved TSV files listed below:\n", paste(saved_paths, collapse = "\n"), "\n")
+gc()
+```
+20260908_214108.tsv 
+
+# metrics outliers
+```r
+target_lib <- "/global/home/hpc6297/R/x86_64-pc-linux-gnu-library/4.6"
+.libPaths(c(target_lib, .libPaths()))
+
+options(width = 800)
+
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+
+work_dir <- "/global/scratch/hpc6297/neutrotime_output"
+setwd(work_dir)
+
+target_file <- file.path(work_dir, "neutrotime_postQC_neutrophils_SCT.rds")
+neu <- readRDS(target_file)
+
+res_col <- "SCT_snn_res.0.8"
+qc_metrics <- c("nCount_RNA", "nFeature_RNA", "percent_mito", "percent_ribo")
+
+# set up cluster factor in numerical order
+cluster_levels <- as.character(sort(as.numeric(unique(neu@meta.data[[res_col]]))))
+groups <- factor(as.character(neu@meta.data[[res_col]]), levels = cluster_levels)
+
+group_ids <- levels(groups)
+n_cells <- as.vector(table(groups))
+
+# calculate medians across metrics
+medians <- lapply(qc_metrics, function(metric) {
+vals <- neu@meta.data[[metric]]
+tapply(vals, groups, median, na.rm = TRUE)
+})
+
+df_summary <- data.frame(
+cluster = group_ids,
+cells = n_cells,
+nCount_RNA_median = round(as.numeric(medians[[1]]), 1),
+nFeature_RNA_median = round(as.numeric(medians[[2]]), 1),
+percent_mito_median = round(as.numeric(medians[[3]]), 3),
+percent_ribo_median = round(as.numeric(medians[[4]]), 3),
+stringsAsFactors = FALSE
+)
+
+# save tsv
+tsv_out <- file.path(work_dir, "neutrotime_technical_qc_metrics_res0.8.tsv")
+write.table(df_summary, file = tsv_out, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# print summary table to console
+cat("cluster-level technical qc medians (res 0.8):\n")
+print(df_summary, row.names = FALSE)
+cat("\nsaved metrics summary to:", tsv_out, "\n")
+
+# generate and save diagnostic violin plot
+neu$qc_cluster <- groups
+vln_p <- VlnPlot(
+neu,
+features = qc_metrics,
+group.by = "qc_cluster",
+pt.size = 0.1,
+ncol = 2
+) +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+png_out <- file.path(work_dir, "neutrotime_technical_qc_metrics_res0.8_vln.png")
+ggsave(png_out, plot = vln_p, width = 14, height = 10, dpi = 300, bg = "white")
+cat("saved violin plots to:", png_out, "\n")
+```
+
+```
+cluster-level technical qc medians (res 0.8):
+ cluster cells nCount_RNA_median nFeature_RNA_median percent_mito_median percent_ribo_median
+       1  2095             767.0               400.0               0.174               5.078
+       2  1297             800.0               385.0               0.182               4.825
+       3  1163            4118.0               894.0               0.224               1.997
+       4  1033             865.0               396.0               0.172               3.883
+       5  1012            1952.5               544.0               0.185               2.104
+       6   893            2567.0               653.0               0.212               2.054
+       7   862             876.0               405.0               0.142               3.307
+       8   832            1071.5               411.0               0.158               3.050
+       9   805            1112.0               417.0               0.181               3.035
+      10   667             836.0               395.0               0.161               4.538
+      11   559            2505.0               631.0               0.201               1.832
+      12   360             878.5               410.5               0.168               3.506
+      13   317            1028.0               415.0               0.165               3.128
+      14   291            1053.0               480.0               0.267               4.775
+      15   221            1138.0               429.0               0.165               2.633
+      16   169            7007.0              1542.0               0.459               3.409
+      17   145            1652.0               403.0               0.117               2.364
+      18   124            1596.5               487.5               0.212               2.589
+
+saved metrics summary to: /global/scratch/hpc6297/neutrotime_output/neutrotime_technical_qc_metrics_res0.8.tsv 
+saved violin plots to: /global/scratch/hpc6297/neutrotime_output/neutrotime_technical_qc_metrics_res0.8_vln.png 
+```
